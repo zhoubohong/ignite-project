@@ -24,6 +24,22 @@ interface Stats {
   }>;
 }
 
+interface MasteryItem {
+  knowledge_point: string;
+  subject: string;
+  state: string;
+  p_learned: number;
+  total_attempts: number;
+  correct_count: number;
+}
+
+interface DailyItem {
+  date: string;
+  total: number;
+  correct: number;
+  accuracy: number;
+}
+
 const SUBJECTS = [
   { value: "", label: "自动识别" },
   { value: "math", label: "数学" },
@@ -43,6 +59,14 @@ const STATE_LABELS: Record<string, string> = {
   mastered: "已掌握",
 };
 
+const ERROR_LABELS: Record<string, string> = {
+  concept: "概念未掌握",
+  formula: "公式套错",
+  calculation: "计算粗心",
+  unit: "单位遗漏",
+  reading: "审题偏差",
+};
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -50,7 +74,12 @@ export default function Home() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [userId] = useState(() => crypto.randomUUID());
   const [showDashboard, setShowDashboard] = useState(false);
+  const [dashboardTab, setDashboardTab] = useState<"stats" | "mastery" | "mistakes" | "daily">("stats");
   const [stats, setStats] = useState<Stats | null>(null);
+  const [mastery, setMastery] = useState<MasteryItem[] | null>(null);
+  const [mistakes, setMistakes] = useState<Record<string, number> | null>(null);
+  const [daily, setDaily] = useState<DailyItem[] | null>(null);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
   const [error, setError] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -61,10 +90,21 @@ export default function Home() {
 
   useEffect(() => {
     if (showDashboard) {
-      fetch(`/api/dashboard/stats/${userId}`)
-        .then((r) => r.json())
-        .then(setStats)
-        .catch(() => {});
+      setDashboardLoading(true);
+      Promise.all([
+        fetch(`/api/dashboard/stats/${userId}`).then((r) => r.json()),
+        fetch(`/api/dashboard/mastery/${userId}`).then((r) => r.json()),
+        fetch(`/api/dashboard/mistakes/${userId}`).then((r) => r.json()),
+        fetch(`/api/dashboard/daily/${userId}`).then((r) => r.json()),
+      ])
+        .then(([s, m, mi, d]) => {
+          setStats(s);
+          setMastery(m);
+          setMistakes(mi);
+          setDaily(d);
+        })
+        .catch(() => {})
+        .finally(() => setDashboardLoading(false));
     }
   }, [showDashboard, userId]);
 
@@ -77,8 +117,10 @@ export default function Home() {
     setMessages((prev) => [...prev, { role: "user", content: text }]);
     setLoading(true);
 
+    const controller = new AbortController();
+
     try {
-      const resp = await fetch("/api/chat/send", {
+      const resp = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -86,26 +128,95 @@ export default function Home() {
           session_id: sessionId,
           user_id: userId,
         }),
+        signal: controller.signal,
       });
+
       if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
-      const data = await resp.json();
-      setSessionId(data.session_id);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: data.reply,
-          metadata: {
-            intent: data.intent,
-            subject: data.subject,
-            agent: data.agent,
-          },
-        },
-      ]);
-    } catch (e: any) {
-      setError(e.message || "连接失败，请确认后端已启动");
+
+      const reader = resp.body?.getReader();
+      if (!reader) throw new Error("Stream not supported");
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let assistantCreated = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+
+          const jsonStr = trimmed.slice(6);
+          try {
+            const event = JSON.parse(jsonStr);
+
+            if (event.done) {
+              break;
+            }
+
+            if (!assistantCreated && event.session_id) {
+              setSessionId(event.session_id);
+              assistantCreated = true;
+              setMessages((prev) => [
+                ...prev,
+                {
+                  role: "assistant",
+                  content: "",
+                  metadata: {
+                    intent: event.intent,
+                    subject: event.subject,
+                    agent: event.agent,
+                  },
+                },
+              ]);
+            } else if (event.token) {
+              if (!assistantCreated) {
+                assistantCreated = true;
+                setMessages((prev) => [
+                  ...prev,
+                  { role: "assistant", content: event.token, metadata: {} },
+                ]);
+              } else {
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  const last = updated[updated.length - 1];
+                  if (last && last.role === "assistant") {
+                    updated[updated.length - 1] = {
+                      ...last,
+                      content: last.content + event.token,
+                    };
+                  }
+                  return updated;
+                });
+              }
+            }
+          } catch {
+            // skip malformed SSE data
+          }
+        }
+      }
+    } catch (e: unknown) {
+      if (e instanceof DOMException && e.name === "AbortError") {
+        return;
+      }
+      const msg = e instanceof Error ? e.message : "连接失败";
+      setError(msg || "连接失败，请确认后端已启动");
+      setMessages((prev) => {
+        const last = prev[prev.length - 1];
+        if (last?.role === "assistant" && !last.content && !last.metadata?.intent) {
+          return prev.slice(0, -1);
+        }
+        return prev;
+      });
     } finally {
       setLoading(false);
+      controller.abort();
     }
   }, [input, loading, sessionId, userId]);
 
@@ -265,64 +376,236 @@ export default function Home() {
       </div>
 
       {/* Dashboard Sidebar */}
-      {showDashboard && stats && (
-        <aside className="w-80 border-l bg-white overflow-y-auto p-4 space-y-4 shrink-0">
-          <h2 className="font-bold text-gray-700">📊 学习面板（近7天）</h2>
-
-          <div className="grid grid-cols-2 gap-2">
-            <div className="bg-blue-50 rounded-lg p-3">
-              <p className="text-xs text-gray-500">学习会话</p>
-              <p className="text-xl font-bold text-blue-600">
-                {stats.total_sessions}
-              </p>
-            </div>
-            <div className="bg-green-50 rounded-lg p-3">
-              <p className="text-xs text-gray-500">做题总数</p>
-              <p className="text-xl font-bold text-green-600">
-                {stats.total_questions_answered}
-              </p>
-            </div>
-            <div className="bg-orange-50 rounded-lg p-3 col-span-2">
-              <p className="text-xs text-gray-500">近期错题</p>
-              <p className="text-xl font-bold text-orange-600">
-                {stats.recent_mistakes}
-              </p>
-            </div>
+      {showDashboard && (
+        <aside className="w-80 border-l bg-white overflow-y-auto shrink-0 flex flex-col">
+          {/* Tab bar */}
+          <div className="flex border-b shrink-0">
+            {([
+              ["stats", "概览"],
+              ["mastery", "掌握度"],
+              ["mistakes", "错题"],
+              ["daily", "趋势"],
+            ] as const).map(([tab, label]) => (
+              <button
+                key={tab}
+                onClick={() => setDashboardTab(tab)}
+                className={`flex-1 py-2 text-xs font-medium border-b-2 transition-colors ${
+                  dashboardTab === tab
+                    ? "border-blue-500 text-blue-600"
+                    : "border-transparent text-gray-400 hover:text-gray-600"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
 
-          <div>
-            <h3 className="text-sm font-semibold text-gray-600 mb-2">
-              掌握度分布
-            </h3>
-            <div className="space-y-1">
-              {Object.entries(stats.mastery_distribution).map(([k, v]) => (
-                <div key={k} className="flex justify-between text-sm">
-                  <span>{STATE_LABELS[k] || k}</span>
-                  <span className="font-medium">{v} 个</span>
+          {/* Tab content */}
+          <div className="p-4 space-y-4 flex-1">
+            {dashboardLoading && (
+              <div className="flex justify-center py-8">
+                <div className="flex gap-1">
+                  <span className="w-2 h-2 bg-gray-300 rounded-full animate-bounce" />
+                  <span className="w-2 h-2 bg-gray-300 rounded-full animate-bounce" style={{ animationDelay: "0.1s" }} />
+                  <span className="w-2 h-2 bg-gray-300 rounded-full animate-bounce" style={{ animationDelay: "0.2s" }} />
                 </div>
-              ))}
-            </div>
-          </div>
+              </div>
+            )}
 
-          {stats.weak_points_top5.length > 0 && (
-            <div>
-              <h3 className="text-sm font-semibold text-red-600 mb-2">
-                ⚠️ 薄弱知识点 TOP5
-              </h3>
-              <ul className="space-y-1 text-sm">
-                {stats.weak_points_top5.map((wp, i) => (
-                  <li key={i} className="flex justify-between">
-                    <span className="text-gray-700">
-                      [{wp.subject}] {wp.knowledge_point}
-                    </span>
-                    <span className="text-red-500 font-medium">
-                      {Math.round(wp.p_learned * 100)}%
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+            {!dashboardLoading && (
+              <>
+                {/* ── Stats Overview Tab ── */}
+                {dashboardTab === "stats" && stats && (
+                  <>
+                    <h2 className="font-bold text-gray-700">📊 学习概览（近7天）</h2>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="bg-blue-50 rounded-lg p-3">
+                        <p className="text-xs text-gray-500">学习会话</p>
+                        <p className="text-xl font-bold text-blue-600">{stats.total_sessions}</p>
+                      </div>
+                      <div className="bg-green-50 rounded-lg p-3">
+                        <p className="text-xs text-gray-500">做题总数</p>
+                        <p className="text-xl font-bold text-green-600">{stats.total_questions_answered}</p>
+                      </div>
+                      <div className="bg-orange-50 rounded-lg p-3 col-span-2">
+                        <p className="text-xs text-gray-500">近期错题</p>
+                        <p className="text-xl font-bold text-orange-600">{stats.recent_mistakes}</p>
+                      </div>
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-semibold text-gray-600 mb-2">掌握度分布</h3>
+                      <div className="space-y-1">
+                        {Object.entries(stats.mastery_distribution).map(([k, v]) => (
+                          <div key={k} className="flex justify-between text-sm">
+                            <span>{STATE_LABELS[k] || k}</span>
+                            <span className="font-medium">{v} 个</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    {stats.weak_points_top5.length > 0 && (
+                      <div>
+                        <h3 className="text-sm font-semibold text-red-600 mb-2">⚠️ 薄弱知识点 TOP5</h3>
+                        <ul className="space-y-1 text-sm">
+                          {stats.weak_points_top5.map((wp, i) => (
+                            <li key={i} className="flex justify-between">
+                              <span className="text-gray-700">[{wp.subject}] {wp.knowledge_point}</span>
+                              <span className="text-red-500 font-medium">{Math.round(wp.p_learned * 100)}%</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* ── Mastery Detail Tab ── */}
+                {dashboardTab === "mastery" && mastery && (
+                  <>
+                    <h2 className="font-bold text-gray-700">📋 掌握度详情</h2>
+                    {mastery.length === 0 ? (
+                      <p className="text-sm text-gray-400 text-center py-4">暂无数据，开始做题吧！</p>
+                    ) : (
+                      <ul className="space-y-2">
+                        {mastery.map((m, i) => (
+                          <li key={i} className="bg-gray-50 rounded-lg p-3">
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-sm font-medium text-gray-700 truncate max-w-[140px]">
+                                {m.knowledge_point}
+                              </span>
+                              <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${
+                                m.state === "mastered" ? "bg-green-100 text-green-700" :
+                                m.state === "practicing" ? "bg-blue-100 text-blue-700" :
+                                m.state === "exposed" ? "bg-yellow-100 text-yellow-700" :
+                                "bg-gray-100 text-gray-500"
+                              }`}>
+                                {STATE_LABELS[m.state] || m.state}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-xs text-gray-400">
+                                {SUBJECTS.find((s) => s.value === m.subject)?.label || m.subject}
+                              </span>
+                              <span className="text-xs text-gray-400">
+                                {m.correct_count}/{m.total_attempts} 次
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full transition-all ${
+                                    m.p_learned >= 0.95 ? "bg-green-500" :
+                                    m.p_learned >= 0.7 ? "bg-blue-500" :
+                                    m.p_learned >= 0.4 ? "bg-yellow-500" :
+                                    "bg-red-400"
+                                  }`}
+                                  style={{ width: `${Math.round(m.p_learned * 100)}%` }}
+                                />
+                              </div>
+                              <span className="text-xs font-medium text-gray-500 w-10 text-right">
+                                {Math.round(m.p_learned * 100)}%
+                              </span>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </>
+                )}
+
+                {/* ── Mistake Distribution Tab ── */}
+                {dashboardTab === "mistakes" && mistakes && (
+                  <>
+                    <h2 className="font-bold text-gray-700">📉 错题分布（近30天）</h2>
+                    {Object.keys(mistakes).length === 0 ? (
+                      <p className="text-sm text-gray-400 text-center py-4">暂无错题，继续保持！</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {Object.entries(mistakes)
+                          .sort(([, a], [, b]) => b - a)
+                          .map(([errType, count]) => {
+                            const total = Object.values(mistakes).reduce((s, v) => s + v, 0);
+                            const pct = Math.round((count / total) * 100);
+                            return (
+                              <div key={errType}>
+                                <div className="flex justify-between text-xs mb-0.5">
+                                  <span className="text-gray-600">
+                                    {ERROR_LABELS[errType] || errType}
+                                  </span>
+                                  <span className="text-gray-400">
+                                    {count} 次 · {pct}%
+                                  </span>
+                                </div>
+                                <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                                  <div
+                                    className={`h-full rounded-full transition-all ${
+                                      errType === "concept" ? "bg-red-500" :
+                                      errType === "formula" ? "bg-orange-500" :
+                                      errType === "calculation" ? "bg-yellow-500" :
+                                      errType === "unit" ? "bg-blue-400" :
+                                      "bg-purple-400"
+                                    }`}
+                                    style={{ width: `${Math.max(pct, 4)}%` }}
+                                  />
+                                </div>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* ── Daily Activity Tab ── */}
+                {dashboardTab === "daily" && daily && (
+                  <>
+                    <h2 className="font-bold text-gray-700">📈 每日答题趋势（近7天）</h2>
+                    {daily.length === 0 ? (
+                      <p className="text-sm text-gray-400 text-center py-4">暂无数据</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {/* Summary row */}
+                        <div className="flex justify-between text-xs text-gray-400">
+                          <span>日期</span>
+                          <span>题数 / 正确率</span>
+                        </div>
+                        {daily.map((d) => (
+                          <div key={d.date} className="flex items-center gap-2">
+                            <span className="text-xs text-gray-500 w-12 shrink-0">
+                              {d.date.slice(5)}
+                            </span>
+                            <div className="flex-1 flex items-center gap-1">
+                              {/* Bar: total questions */}
+                              <div className="flex-1 h-5 bg-gray-100 rounded relative overflow-hidden">
+                                <div
+                                  className="absolute inset-y-0 left-0 bg-blue-200 rounded"
+                                  style={{ width: `${Math.min((d.total / Math.max(...daily.map((x) => x.total), 1)) * 100, 100)}%` }}
+                                />
+                                <span className="absolute inset-0 flex items-center pl-1 text-xs text-gray-600 font-medium">
+                                  {d.total}题
+                                </span>
+                              </div>
+                              {/* Accuracy indicator */}
+                              <span
+                                className={`text-xs font-medium w-11 text-right ${
+                                  d.accuracy >= 80 ? "text-green-600" :
+                                  d.accuracy >= 60 ? "text-yellow-600" :
+                                  d.accuracy > 0 ? "text-red-500" :
+                                  "text-gray-300"
+                                }`}
+                              >
+                                {d.accuracy > 0 ? `${d.accuracy}%` : "—"}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+          </div>
         </aside>
       )}
     </div>
