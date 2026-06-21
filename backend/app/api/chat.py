@@ -103,7 +103,7 @@ async def chat_stream(
             full_reply += token
             yield f"data: {_json.dumps({'token': token})}\n\n"
 
-        yield "data: [DONE]\n\n"
+        yield f"data: {_json.dumps({'done': True})}\n\n"
 
         # Save reply
         await session_memory.add_turn(sid, "assistant", full_reply)

@@ -92,7 +92,7 @@ class TestChatStream:
         assert "text/event-stream" in resp.headers.get("content-type", "")
         body = resp.text
         assert "data: " in body
-        assert "[DONE]" in body
+        assert '"done": true' in body.lower() or '[DONE]' in body
 
     @pytest.mark.asyncio
     async def test_stream_metadata_event(self, async_client):
