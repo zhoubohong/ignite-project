@@ -40,6 +40,28 @@ interface DailyItem {
   accuracy: number;
 }
 
+interface QuestionItem {
+  id: string;
+  qtype: string;
+  subject: string;
+  grade_level: string;
+  difficulty: number;
+  stem: string;
+  options: Record<string, string>;
+  answer: string;
+  explanation: string;
+  knowledge_points: string[];
+  source: string;
+}
+
+interface ExerciseResult {
+  is_correct: boolean;
+  correct_answer: string;
+  explanation: string;
+  error_type: string;
+  mastery_p_learned: number;
+}
+
 const SUBJECTS = [
   { value: "", label: "自动识别" },
   { value: "math", label: "数学" },
@@ -67,6 +89,17 @@ const ERROR_LABELS: Record<string, string> = {
   reading: "审题偏差",
 };
 
+const QTYPE_LABELS: Record<string, string> = {
+  single_choice: "单选题",
+  multi_choice: "多选题",
+  true_false: "判断题",
+  fill_blank: "填空题",
+  short_answer: "简答题",
+  calculation: "计算题",
+  cloze: "完形填空",
+  reading: "阅读理解",
+};
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -80,6 +113,15 @@ export default function Home() {
   const [mistakes, setMistakes] = useState<Record<string, number> | null>(null);
   const [daily, setDaily] = useState<DailyItem[] | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(false);
+
+  // Exercise mode
+  const [exerciseMode, setExerciseMode] = useState(false);
+  const [currentQuestion, setCurrentQuestion] = useState<QuestionItem | null>(null);
+  const [userAnswer, setUserAnswer] = useState("");
+  const [exerciseResult, setExerciseResult] = useState<ExerciseResult | null>(null);
+  const [exerciseLoading, setExerciseLoading] = useState(false);
+  const [exerciseOffset, setExerciseOffset] = useState(0);
+
   const [error, setError] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -233,6 +275,73 @@ export default function Home() {
     inputRef.current?.focus();
   };
 
+  // ─── Exercise functions ───
+
+  const fetchQuestion = useCallback(async () => {
+    setExerciseLoading(true);
+    setExerciseResult(null);
+    setUserAnswer("");
+    try {
+      const resp = await fetch(
+        `/api/questions/?limit=1&offset=${exerciseOffset}`
+      );
+      if (!resp.ok) throw new Error("Failed to fetch");
+      const data: QuestionItem[] = await resp.json();
+      if (data.length > 0) {
+        setCurrentQuestion(data[0]);
+        setExerciseOffset((prev) => prev + 1);
+      } else {
+        // No questions — generate one
+        setCurrentQuestion(null);
+        setExerciseResult({
+          is_correct: true,
+          correct_answer: "",
+          explanation: "题库暂无题目，请先在后台生成题目",
+          error_type: "",
+          mastery_p_learned: 0,
+        });
+      }
+    } catch {
+      setError("获取题目失败");
+    } finally {
+      setExerciseLoading(false);
+    }
+  }, [exerciseOffset]);
+
+  const toggleExercise = () => {
+    if (!exerciseMode && !currentQuestion) {
+      fetchQuestion();
+    }
+    setExerciseMode(!exerciseMode);
+    setShowDashboard(false);
+  };
+
+  const submitAnswer = useCallback(async () => {
+    if (!currentQuestion || !userAnswer.trim() || exerciseLoading) return;
+    setExerciseLoading(true);
+    try {
+      const resp = await fetch("/api/chat/answer/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question_id: currentQuestion.id,
+          student_answer: userAnswer.trim(),
+          session_id: sessionId || crypto.randomUUID(),
+          user_id: userId,
+          subject: currentQuestion.subject,
+          knowledge_point: currentQuestion.knowledge_points?.[0] || "",
+        }),
+      });
+      if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+      const data: ExerciseResult = await resp.json();
+      setExerciseResult(data);
+    } catch {
+      setError("提交答案失败");
+    } finally {
+      setExerciseLoading(false);
+    }
+  }, [currentQuestion, userAnswer, exerciseLoading, sessionId, userId]);
+
   return (
     <div className="flex h-screen bg-gray-50">
       {/* Main Chat */}
@@ -247,10 +356,20 @@ export default function Home() {
           </h1>
           <div className="flex gap-2">
             <button
-              onClick={() => setShowDashboard(!showDashboard)}
-              className="px-3 py-1.5 text-sm rounded-lg border hover:bg-gray-50"
+              onClick={() => { setShowDashboard(!showDashboard); setExerciseMode(false); }}
+              className={`px-3 py-1.5 text-sm rounded-lg border hover:bg-gray-50 ${
+                showDashboard ? "bg-blue-50 border-blue-200 text-blue-600" : ""
+              }`}
             >
-              {showDashboard ? "关闭面板" : "学习面板"}
+              学习面板
+            </button>
+            <button
+              onClick={() => { toggleExercise(); }}
+              className={`px-3 py-1.5 text-sm rounded-lg border hover:bg-gray-50 ${
+                exerciseMode ? "bg-green-50 border-green-200 text-green-600" : ""
+              }`}
+            >
+              刷题练习
             </button>
             <button
               onClick={newSession}
@@ -604,6 +723,198 @@ export default function Home() {
                   </>
                 )}
               </>
+            )}
+          </div>
+        </aside>
+      )}
+
+      {/* Exercise Panel */}
+      {exerciseMode && (
+        <aside className="w-96 border-l bg-white overflow-y-auto shrink-0 flex flex-col">
+          <div className="p-4 space-y-4 flex-1">
+            <h2 className="font-bold text-gray-700">📝 刷题练习</h2>
+
+            {!currentQuestion && !exerciseResult && (
+              <div className="text-center py-8">
+                {exerciseLoading ? (
+                  <div className="flex justify-center">
+                    <div className="flex gap-1">
+                      <span className="w-2 h-2 bg-gray-300 rounded-full animate-bounce" />
+                      <span className="w-2 h-2 bg-gray-300 rounded-full animate-bounce" style={{ animationDelay: "0.1s" }} />
+                      <span className="w-2 h-2 bg-gray-300 rounded-full animate-bounce" style={{ animationDelay: "0.2s" }} />
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <p className="text-sm text-gray-400 mb-4">暂无题目，点击下方按钮出题</p>
+                    <button
+                      onClick={fetchQuestion}
+                      className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 text-sm font-medium"
+                    >
+                      🎲 随机出题
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* Question card */}
+            {currentQuestion && (
+              <div className="bg-gray-50 rounded-lg p-4 space-y-3">
+                {/* Meta line */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full">
+                    {QTYPE_LABELS[currentQuestion.qtype] || currentQuestion.qtype}
+                  </span>
+                  <span className="text-xs px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full">
+                    {SUBJECTS.find((s) => s.value === currentQuestion.subject)?.label}
+                  </span>
+                  <span className="text-xs text-gray-400">
+                    {currentQuestion.grade_level}年级 · 难度 {Math.round(currentQuestion.difficulty * 100)}%
+                  </span>
+                </div>
+
+                {/* Stem */}
+                <div className="text-sm text-gray-800 leading-relaxed whitespace-pre-wrap">
+                  {currentQuestion.stem}
+                </div>
+
+                {/* Options for choice types */}
+                {["single_choice", "multi_choice", "true_false"].includes(currentQuestion.qtype) &&
+                  Object.keys(currentQuestion.options).length > 0 && (
+                  <div className="space-y-1.5">
+                    {Object.entries(currentQuestion.options).map(([key, text]) => {
+                      const isSelected = userAnswer === key;
+                      return (
+                        <button
+                          key={key}
+                          disabled={!!exerciseResult}
+                          onClick={() => setUserAnswer(key)}
+                          className={`w-full text-left px-3 py-2 rounded-lg text-sm border transition-colors ${
+                            exerciseResult
+                              ? key === currentQuestion.answer
+                                ? "bg-green-50 border-green-400 text-green-700"
+                                : isSelected
+                                ? "bg-red-50 border-red-400 text-red-700"
+                                : "bg-white border-gray-200 text-gray-500"
+                              : isSelected
+                              ? "bg-blue-50 border-blue-400 text-blue-700"
+                              : "bg-white border-gray-200 hover:border-blue-300"
+                          }`}
+                        >
+                          <span className="font-medium mr-1">{key}.</span>
+                          {text}
+                          {exerciseResult && key === currentQuestion.answer && (
+                            <span className="ml-1">✅</span>
+                          )}
+                          {exerciseResult && isSelected && key !== currentQuestion.answer && (
+                            <span className="ml-1">❌</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Input for fill-blank / short-answer */}
+                {["fill_blank", "short_answer", "calculation"].includes(currentQuestion.qtype) && (
+                  <input
+                    type="text"
+                    value={userAnswer}
+                    onChange={(e) => setUserAnswer(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !exerciseResult) submitAnswer(); }}
+                    placeholder="输入你的答案..."
+                    disabled={!!exerciseResult}
+                    className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 disabled:opacity-50"
+                  />
+                )}
+
+                {/* Submit / Next buttons */}
+                <div className="flex gap-2">
+                  {!exerciseResult && (
+                    <button
+                      onClick={submitAnswer}
+                      disabled={exerciseLoading || !userAnswer.trim()}
+                      className="flex-1 px-3 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 text-sm font-medium"
+                    >
+                      {exerciseLoading ? "批改中..." : "提交答案"}
+                    </button>
+                  )}
+                  {exerciseResult && (
+                    <button
+                      onClick={fetchQuestion}
+                      className="flex-1 px-3 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 text-sm font-medium"
+                    >
+                      {exerciseLoading ? "加载中..." : "下一题 →"}
+                    </button>
+                  )}
+                </div>
+
+                {/* Result feedback */}
+                {exerciseResult && (
+                  <div
+                    className={`rounded-lg p-3 text-sm space-y-2 ${
+                      exerciseResult.is_correct ? "bg-green-50 border border-green-200" : "bg-red-50 border border-red-200"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-lg">{exerciseResult.is_correct ? "✅" : "❌"}</span>
+                      <span className={`font-medium ${
+                        exerciseResult.is_correct ? "text-green-700" : "text-red-700"
+                      }`}>
+                        {exerciseResult.is_correct ? "回答正确！" : "回答错误"}
+                      </span>
+                    </div>
+
+                    {!exerciseResult.is_correct && (
+                      <>
+                        <div>
+                          <span className="text-red-600 font-medium">正确答案：</span>
+                          <span className="text-red-700">{exerciseResult.correct_answer}</span>
+                        </div>
+                        {exerciseResult.error_type && (
+                          <div className="flex items-center gap-1">
+                            <span className="text-gray-500">错因：</span>
+                            <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${
+                              exerciseResult.error_type === "concept" ? "bg-red-100 text-red-700" :
+                              exerciseResult.error_type === "formula" ? "bg-orange-100 text-orange-700" :
+                              exerciseResult.error_type === "calculation" ? "bg-yellow-100 text-yellow-700" :
+                              exerciseResult.error_type === "unit" ? "bg-blue-100 text-blue-700" :
+                              "bg-purple-100 text-purple-700"
+                            }`}>
+                              {ERROR_LABELS[exerciseResult.error_type] || exerciseResult.error_type}
+                            </span>
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    {exerciseResult.explanation && (
+                      <div className="text-gray-600 leading-relaxed">
+                        <span className="font-medium">解析：</span>
+                        {exerciseResult.explanation}
+                      </div>
+                    )}
+
+                    <div className="text-xs text-gray-400">
+                      当前掌握度：{Math.round(exerciseResult.mastery_p_learned * 100)}%
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Empty result message (e.g. no questions in bank) */}
+            {!currentQuestion && exerciseResult && (
+              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                <p className="text-sm text-yellow-700">{exerciseResult.explanation}</p>
+                <button
+                  onClick={fetchQuestion}
+                  className="mt-2 px-3 py-1.5 bg-yellow-100 text-yellow-700 rounded-lg hover:bg-yellow-200 text-xs"
+                >
+                  再试一次
+                </button>
+              </div>
             )}
           </div>
         </aside>
