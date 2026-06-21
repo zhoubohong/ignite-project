@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     # LLM Gateway – LM Studio (local, zero-cost, highest priority)
     lm_studio: LLMProviderConfig = LLMProviderConfig(
         api_base="http://localhost:1234/v1",
-        model="local-model",
+        model="qwen3.6-35b",
         priority=1,
     )
 
