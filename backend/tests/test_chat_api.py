@@ -119,7 +119,7 @@ class TestAnswerCheck:
 
         resp = await async_client.post(
             "/api/chat/answer/check",
-            params={
+            json={
                 "question_id": seed_question,
                 "student_answer": "B",
                 "session_id": sid,
@@ -142,7 +142,7 @@ class TestAnswerCheck:
 
         resp = await async_client.post(
             "/api/chat/answer/check",
-            params={
+            json={
                 "question_id": seed_question,
                 "student_answer": "A",
                 "session_id": sid,
@@ -162,7 +162,7 @@ class TestAnswerCheck:
     async def test_answer_check_nonexistent_question(self, async_client):
         resp = await async_client.post(
             "/api/chat/answer/check",
-            params={
+            json={
                 "question_id": str(uuid.uuid4()),
                 "student_answer": "A",
                 "session_id": str(uuid.uuid4()),
@@ -175,6 +175,6 @@ class TestAnswerCheck:
     async def test_answer_check_missing_params(self, async_client):
         resp = await async_client.post(
             "/api/chat/answer/check",
-            params={"question_id": str(uuid.uuid4())},
+            json={"question_id": str(uuid.uuid4())},
         )
         assert resp.status_code == 422

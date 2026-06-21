@@ -118,20 +118,24 @@ async def chat_stream(
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+class AnswerCheckRequest(BaseModel):
+    question_id: str
+    student_answer: str
+    session_id: str
+    user_id: str
+    subject: str = "math"
+    knowledge_point: str = ""
+
+
 @router.post("/answer/check")
 async def check_answer(
-    question_id: str,
-    student_answer: str,
-    session_id: str,
-    user_id: str,
-    subject: str = "math",
-    knowledge_point: str = "",
+    req: AnswerCheckRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """Check student answer and update BKT mastery."""
-    qid = uuid.UUID(question_id)
-    sid = uuid.UUID(session_id)
-    uid = uuid.UUID(user_id)
+    qid = uuid.UUID(req.question_id)
+    sid = uuid.UUID(req.session_id)
+    uid = uuid.UUID(req.user_id)
 
     # Get question
     from app.models.question import Question
@@ -143,12 +147,12 @@ async def check_answer(
         raise HTTPException(404, "Question not found")
 
     # Simple answer check (exact match for now)
-    is_correct = student_answer.strip() == question.answer.strip()
+    is_correct = req.student_answer.strip() == question.answer.strip()
 
     # Update BKT
-    if knowledge_point:
+    if req.knowledge_point:
         await learning_memory.update_bkt(
-            db, uid, subject, knowledge_point, is_correct
+            db, uid, req.subject, req.knowledge_point, is_correct
         )
 
     # Record mistake if wrong
@@ -157,7 +161,7 @@ async def check_answer(
         # Simple error classification via LLM
         classify_msg = [
             {"role": "system", "content": "分析学生错因，只回复一个词：concept（概念未掌握）、formula（公式套错）、calculation（计算粗心）、unit（单位遗漏）、reading（审题偏差）"},
-            {"role": "user", "content": f"正确答案：{question.answer}\n学生答案：{student_answer}\n题干：{question.stem}"},
+            {"role": "user", "content": f"正确答案：{question.answer}\n学生答案：{req.student_answer}\n题干：{question.stem}"},
         ]
         try:
             r = await gateway.chat(classify_msg, temperature=0.1, max_tokens=32)
@@ -166,16 +170,16 @@ async def check_answer(
             error_type = "concept"
 
         await learning_memory.record_mistake(
-            db, uid, qid, student_answer, question.answer, error_type,
+            db, uid, qid, req.student_answer, question.answer, error_type,
         )
 
     # Log answer
-    mastery = await learning_memory.get_mastery(db, uid, knowledge_point)
+    mastery = await learning_memory.get_mastery(db, uid, req.knowledge_point)
     record = AnswerRecord(
         session_id=sid,
         user_id=uid,
         question_id=qid,
-        student_answer=student_answer,
+        student_answer=req.student_answer,
         is_correct=is_correct,
         mastery_before=mastery.p_learned if mastery else 0.3,
         mastery_after=mastery.p_learned if mastery else 0.3,
