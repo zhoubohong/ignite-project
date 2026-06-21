@@ -1,0 +1,35 @@
+name: bansheng
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - postgresql=16
+  - redis=7
+  - nodejs=20
+  - pip:
+      - fastapi==0.115.6
+      - uvicorn[standard]==0.34.0
+      - pydantic==2.10.3
+      - pydantic-settings==2.7.0
+      - sqlalchemy==2.0.36
+      - asyncpg==0.30.0
+      - pgvector==0.3.6
+      - alembic==1.14.0
+      - redis==5.2.1
+      - httpx==0.28.1
+      - openai==1.58.1
+      - langchain==0.3.14
+      - langgraph==0.2.61
+      - sentence-transformers==3.3.1
+      - numpy==2.2.1
+      - scipy==1.14.1
+      - sse-starlette==2.2.1
+      - python-multipart==0.0.18
+      # Test dependencies
+      - pytest==8.3.4
+      - pytest-asyncio==0.25.0
+      - pytest-httpx==0.34.0
+      - fakeredis==2.26.2
+      - aiosqlite==0.20.0
