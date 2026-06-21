@@ -117,8 +117,10 @@ export default function Home() {
     setMessages((prev) => [...prev, { role: "user", content: text }]);
     setLoading(true);
 
+    const controller = new AbortController();
+
     try {
-      const resp = await fetch("/api/chat/send", {
+      const resp = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -126,26 +128,95 @@ export default function Home() {
           session_id: sessionId,
           user_id: userId,
         }),
+        signal: controller.signal,
       });
+
       if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
-      const data = await resp.json();
-      setSessionId(data.session_id);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: data.reply,
-          metadata: {
-            intent: data.intent,
-            subject: data.subject,
-            agent: data.agent,
-          },
-        },
-      ]);
-    } catch (e: any) {
-      setError(e.message || "连接失败，请确认后端已启动");
+
+      const reader = resp.body?.getReader();
+      if (!reader) throw new Error("Stream not supported");
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let assistantCreated = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+
+          const jsonStr = trimmed.slice(6);
+          try {
+            const event = JSON.parse(jsonStr);
+
+            if (event.done) {
+              break;
+            }
+
+            if (!assistantCreated && event.session_id) {
+              setSessionId(event.session_id);
+              assistantCreated = true;
+              setMessages((prev) => [
+                ...prev,
+                {
+                  role: "assistant",
+                  content: "",
+                  metadata: {
+                    intent: event.intent,
+                    subject: event.subject,
+                    agent: event.agent,
+                  },
+                },
+              ]);
+            } else if (event.token) {
+              if (!assistantCreated) {
+                assistantCreated = true;
+                setMessages((prev) => [
+                  ...prev,
+                  { role: "assistant", content: event.token, metadata: {} },
+                ]);
+              } else {
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  const last = updated[updated.length - 1];
+                  if (last && last.role === "assistant") {
+                    updated[updated.length - 1] = {
+                      ...last,
+                      content: last.content + event.token,
+                    };
+                  }
+                  return updated;
+                });
+              }
+            }
+          } catch {
+            // skip malformed SSE data
+          }
+        }
+      }
+    } catch (e: unknown) {
+      if (e instanceof DOMException && e.name === "AbortError") {
+        return;
+      }
+      const msg = e instanceof Error ? e.message : "连接失败";
+      setError(msg || "连接失败，请确认后端已启动");
+      setMessages((prev) => {
+        const last = prev[prev.length - 1];
+        if (last?.role === "assistant" && !last.content && !last.metadata?.intent) {
+          return prev.slice(0, -1);
+        }
+        return prev;
+      });
     } finally {
       setLoading(false);
+      controller.abort();
     }
   }, [input, loading, sessionId, userId]);
 
