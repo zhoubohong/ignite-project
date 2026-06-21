@@ -26,11 +26,46 @@ async def get_db() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+_is_sqlite = settings.database_url.startswith("sqlite")
+
+
 async def init_db() -> None:
-    """Create tables and enable pgvector extension."""
+    """Create tables and enable pgvector extension (PostgreSQL) or shim types (SQLite)."""
+    from app.models.base import Base  # noqa: F811
+
+    if _is_sqlite:
+        _shim_pg_types()
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        return
+
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
-    from app.models.base import Base  # noqa: F811
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+def _shim_pg_types() -> None:
+    """Replace PostgreSQL-only column types (ARRAY, JSONB, Vector) with SQLite equivalents."""
+    from sqlalchemy import JSON, LargeBinary, ARRAY
+    from sqlalchemy.dialects.postgresql import JSONB
+    from pgvector.sqlalchemy import Vector
+    from app.models.base import Base
+
+    # Force model imports to register tables
+    import app.models.user  # noqa: F401
+    import app.models.question  # noqa: F401
+    import app.models.session  # noqa: F401
+
+    for table in list(Base.metadata.tables.values()):
+        for col in table.columns:
+            new_type = None
+            if hasattr(col.type, "item_type") or isinstance(col.type, ARRAY):
+                new_type = JSON()
+            elif isinstance(col.type, JSONB):
+                new_type = JSON()
+            elif isinstance(col.type, Vector):
+                new_type = LargeBinary()
+            if new_type is not None:
+                col.type = new_type
